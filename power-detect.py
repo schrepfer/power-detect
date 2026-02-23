@@ -67,7 +67,7 @@ class StatusHandler(BaseHTTPRequestHandler):
     self.send_response(200)
     self.send_header('Content-type', 'text/plain')
     self.end_headers()
-    self.wfile.write(current_status.encode())
+    self.wfile.write(f'{current_status.value}\n'.encode())
 
   def log_message(self, format, *args):
     # Redirect server logs to logging module
@@ -82,11 +82,17 @@ def monitor_power(pin: int, delay_seconds: int):
   
   logging.info(f"Monitoring GPIO {pin}. Shutdown delay: {delay_seconds}s")
 
+  current_status = (
+      PowerStatus.OK
+      if power_sense.is_pressed
+      else PowerStatus.SHUTDOWN
+  )
+
   while True:
     if power_sense.is_pressed:
       # Power is present
       if current_status != PowerStatus.OK:
-        logging.warning("Power restored. Status: ok")
+        logging.warning("Power restored. Status: {current_status}")
         current_status = PowerStatus.OK
     elif current_status == PowerStatus.OK:
       # Power is lost, start the countdown
@@ -138,5 +144,5 @@ if __name__ == '__main__':
   logging.basicConfig(
       level=a.verbosity,
       datefmt='%Y/%m/%d %H:%M:%S',
-      format='[%(asctime)s] %(levelname)s: %(message)s')
+      format='%(levelname)s: %(message)s')
   sys.exit(main(a))
