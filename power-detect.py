@@ -21,26 +21,31 @@ def define_flags() -> argparse.Namespace:
       '-p', '--port',
       type=int,
       default=1999,
-      help='HTTP port to listen on (default: 1999)')
+      help='HTTP port to listen on (default: 1999)',
+  )
   parser.add_argument(
       '-d', '--delay',
       type=int,
       default=300,
-      help='Seconds to wait after power loss before status becomes "shutdown" (default: 300)')
+      help='Seconds to wait after power loss before status becomes "shutdown" (default: 300)',
+  )
   parser.add_argument(
-      '-g', '--gpio',
+      '-i', '--input-pin',
       type=int,
       default=5,
-      help='GPIO pin to monitor (default: 5)')
+      help='The input GPIO pin (BCM numbering)',
+  )
   parser.add_argument(
       '-v', '--verbosity',
       default=logging.INFO,
       type=int,
-      help='The logging verbosity (DEBUG=10, INFO=20, WARNING=30)')
+      help='The logging verbosity (DEBUG=10, INFO=20, WARNING=30)',
+  )
   parser.add_argument(
       '-V', '--version',
       action='version',
-      version='power-detect version 0.2')
+      version='power-detect version 0.2',
+  )
 
   args = parser.parse_args()
   check_flags(parser, args)
@@ -52,8 +57,8 @@ def check_flags(parser: argparse.ArgumentParser,
   return None
 
 class PowerStatus(Enum):
-  OK = "ok"
-  SHUTDOWN = "shutdown"
+  OK = 'ok'
+  SHUTDOWN = 'shutdown'
 
 # Initial state
 current_status = PowerStatus.OK
@@ -69,9 +74,20 @@ class StatusHandler(BaseHTTPRequestHandler):
     self.end_headers()
     self.wfile.write(f'{current_status.value}\n'.encode())
 
+  def handle_error(self, request, client_address):
+    # Get the current exception
+    exctype, value = sys.exc_info()[:2]
+    
+    # If it's just a connection reset, log it as a warning (or ignore it)
+    if exctype is ConnectionResetError:
+      logging.warning(f'Connection reset by client {client_address}')
+    else:
+      # For all other "real" errors, use the default behavior
+      super().handle_error(request, client_address)
+
   def log_message(self, format, *args):
     # Redirect server logs to logging module
-    logging.info("%s - - %s" % (self.address_string(), format % args))
+    logging.info('%s - - %s' % (self.address_string(), format % args))
 
 def monitor_power(pin: int, delay_seconds: int):
   """Watches the GPIO pin and updates the global status."""
@@ -80,7 +96,7 @@ def monitor_power(pin: int, delay_seconds: int):
   # pull_up=False means we expect 3.3v to pull the pin HIGH
   power_sense = Button(pin, pull_up=False)
   
-  logging.info(f"Monitoring GPIO {pin}. Shutdown delay: {delay_seconds}s")
+  logging.info(f'Monitoring GPIO {pin}. Shutdown delay: {delay_seconds}s')
 
   current_status = (
       PowerStatus.OK
@@ -92,11 +108,11 @@ def monitor_power(pin: int, delay_seconds: int):
     if power_sense.is_pressed:
       # Power is present
       if current_status != PowerStatus.OK:
-        logging.warning("Power restored. Status: {current_status}")
+        logging.warning('Power restored. Status: {current_status}')
         current_status = PowerStatus.OK
     elif current_status == PowerStatus.OK:
       # Power is lost, start the countdown
-      logging.warning(f"Power loss detected! Waiting {delay_seconds}s before signaling shutdown...")
+      logging.warning(f'Power loss detected! Waiting {delay_seconds}s before signaling shutdown...')
       
       # Re-check during the delay
       lost_time = time.time()
@@ -105,12 +121,12 @@ def monitor_power(pin: int, delay_seconds: int):
       while time.time() - lost_time < delay_seconds:
         time.sleep(1)
         if power_sense.is_pressed:
-          logging.info("Power restored during grace period.")
+          logging.info('Power restored during grace period.')
           still_lost = False
           break
       
       if still_lost:
-        logging.critical("Grace period exceeded. Status: shutdown")
+        logging.critical('Grace period exceeded. Status: shutdown')
         current_status = PowerStatus.SHUTDOWN
     
     time.sleep(1)
@@ -120,7 +136,7 @@ def main(args: argparse.Namespace) -> int:
   # Start the power monitoring in a background thread
   monitor_thread = Thread(
       target=monitor_power, 
-      args=(args.gpio, args.delay), 
+      args=(args.input_pin, args.delay), 
       daemon=True
   )
   monitor_thread.start()
@@ -128,12 +144,12 @@ def main(args: argparse.Namespace) -> int:
   # Start the HTTP server
   server_address = ('', args.port)
   httpd = ThreadedHTTPServer(server_address, StatusHandler)
-  logging.info(f"Server started on port {args.port}")
+  logging.info(f'Server started on port {args.port}')
   
   try:
     httpd.serve_forever()
   except KeyboardInterrupt:
-    logging.info("Shutting down...")
+    logging.info('Shutting down...')
     return os.EX_OK
   
   return os.EX_OK
