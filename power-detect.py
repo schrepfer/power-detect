@@ -77,7 +77,7 @@ class StatusHandler(BaseHTTPRequestHandler):
   def handle_error(self, request, client_address):
     # Get the current exception
     exctype, value = sys.exc_info()[:2]
-    
+
     # If it's just a connection reset, log it as a warning (or ignore it)
     if exctype is ConnectionResetError:
       logging.warning(f'Connection reset by client {client_address}')
@@ -92,10 +92,10 @@ class StatusHandler(BaseHTTPRequestHandler):
 def monitor_power(pin: int, delay_seconds: int):
   """Watches the GPIO pin and updates the global status."""
   global current_status
-  
+
   # pull_up=False means we expect 3.3v to pull the pin HIGH
   power_sense = Button(pin, pull_up=False)
-  
+
   logging.info(f'Monitoring GPIO {pin}. Shutdown delay: {delay_seconds}s')
 
   current_status = (
@@ -113,22 +113,22 @@ def monitor_power(pin: int, delay_seconds: int):
     elif current_status == PowerStatus.OK:
       # Power is lost, start the countdown
       logging.warning(f'Power loss detected! Waiting {delay_seconds}s before signaling shutdown...')
-      
+
       # Re-check during the delay
       lost_time = time.time()
       still_lost = True
-      
+
       while time.time() - lost_time < delay_seconds:
         time.sleep(1)
         if power_sense.is_pressed:
           logging.info('Power restored during grace period.')
           still_lost = False
           break
-      
+
       if still_lost:
         logging.critical('Grace period exceeded. Status: shutdown')
         current_status = PowerStatus.SHUTDOWN
-    
+
     time.sleep(1)
 
 
@@ -145,13 +145,13 @@ def main(args: argparse.Namespace) -> int:
   server_address = ('', args.port)
   httpd = ThreadedHTTPServer(server_address, StatusHandler)
   logging.info(f'Server started on port {args.port}')
-  
+
   try:
     httpd.serve_forever()
   except KeyboardInterrupt:
     logging.info('Shutting down...')
     return os.EX_OK
-  
+
   return os.EX_OK
 
 
