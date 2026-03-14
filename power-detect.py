@@ -58,6 +58,7 @@ def check_flags(parser: argparse.ArgumentParser,
 
 class PowerStatus(Enum):
   OK = 'ok'
+  BATTERY = 'battery'
   SHUTDOWN = 'shutdown'
 
 # Initial state
@@ -101,22 +102,23 @@ def monitor_power(pin: int, delay_seconds: int):
   current_status = (
       PowerStatus.OK
       if power_sense.is_pressed
-      else PowerStatus.SHUTDOWN
+      else PowerStatus.BATTERY
   )
 
   while True:
     if power_sense.is_pressed:
       # Power is present
       if current_status != PowerStatus.OK:
-        logging.warning('Power restored. Status: {current_status}')
+        logging.info(f'Power restored! [was {current_status.value}]')
         current_status = PowerStatus.OK
-    elif current_status == PowerStatus.OK:
+    elif current_status in {PowerStatus.OK, PowerStatus.BATTERY}:
       # Power is lost, start the countdown
       logging.warning(f'Power loss detected! Waiting {delay_seconds}s before signaling shutdown...')
 
       # Re-check during the delay
       lost_time = time.time()
       still_lost = True
+      current_status = PowerStatus.BATTERY
 
       while time.time() - lost_time < delay_seconds:
         time.sleep(1)
