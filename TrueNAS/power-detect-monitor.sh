@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Configuration
-TARGET_URL="http://www.x.wabb.it:1999"
+TARGET_URL="http://power.x.wabb.it:1999"
 DEBUG=false
 
 log_message() {

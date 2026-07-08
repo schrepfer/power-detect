@@ -3,10 +3,14 @@
 """Monitors GPIO pin and serves the status via a threaded HTTP server."""
 
 import argparse
+import datetime
 import logging
 import os
 import sys
 import time
+import smtplib
+import socket
+from email.message import EmailMessage
 
 from enum import Enum
 from threading import Thread
@@ -18,55 +22,99 @@ from gpiozero import Button
 def define_flags() -> argparse.Namespace:
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument(
-      '-p', '--port',
-      type=int,
-      default=1999,
-      help='HTTP port to listen on (default: 1999)',
+    '-p', '--port',
+    type=int,
+    default=1999,
+    help='HTTP port to listen on (default: 1999)',
   )
   parser.add_argument(
-      '-d', '--delay',
-      type=int,
-      default=300,
-      help='Seconds to wait after power loss before status becomes "shutdown" (default: 300)',
+    '-d', '--delay',
+    type=int,
+    default=300,
+    help='Seconds to wait after power loss before status becomes "shutdown" (default: 300)',
   )
   parser.add_argument(
-      '-i', '--input-pin',
-      type=int,
-      default=5,
-      help='The input GPIO pin (BCM numbering)',
+    '-i', '--input-pin',
+    type=int,
+    default=5,
+    help='The input GPIO pin (BCM numbering)',
   )
   parser.add_argument(
-      '-v', '--verbosity',
-      default=logging.INFO,
-      type=int,
-      help='The logging verbosity (DEBUG=10, INFO=20, WARNING=30)',
+    '-a', '--admin-email',
+    type=str,
+    default='',
+    help='Email address to notify on power status changes',
   )
   parser.add_argument(
-      '-V', '--version',
-      action='version',
-      version='power-detect version 0.2',
+    '--smtp-server',
+    type=str,
+    default='',
+    help='Email address to notify on power status changes',
+  )
+  parser.add_argument(
+    '-v', '--verbosity',
+    default=logging.INFO,
+    type=int,
+    help='The logging verbosity (DEBUG=10, INFO=20, WARNING=30)',
+  )
+  parser.add_argument(
+    '-V', '--version',
+    action='version',
+    version='power-detect version 0.3',
   )
 
   args = parser.parse_args()
-  check_flags(parser, args)
   return args
 
-def check_flags(parser: argparse.ArgumentParser,
-                args: argparse.Namespace) -> None:
-  # See: http://docs.python.org/3/library/argparse.html#exiting-methods
-  return None
 
 class PowerStatus(Enum):
-  OK = 'ok'
+  UNKNOWN = 'unknown'
+  POWERED = 'powered'
   BATTERY = 'battery'
   SHUTDOWN = 'shutdown'
 
+
 # Initial state
-current_status = PowerStatus.OK
+current_status = PowerStatus.POWERED
+
+
+def send_notification(args: argparse.Namespace, message: str, status: PowerStatus, old_status: PowerStatus = PowerStatus.UNKNOWN):
+  """Sends an email notification via localhost SMTP."""
+  if not args.admin_email or not args.smtp_server:
+    return
+
+  now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+  fqdn = socket.getfqdn()
+
+  msg = EmailMessage()
+  subject = f"[Power Detect] {message}"
+
+  body = [
+    f"Event Time:  {now}",
+    f"Device FQDN: {fqdn}",
+    f"Status:      {old_status.value.upper()} -> {status.value.upper()}",
+  ]
+
+  msg.set_content('\n'.join(body))
+
+  msg['Subject'] = subject
+  msg['From'] = f"power-detect@{socket.getfqdn()}"
+  msg['To'] = args.admin_email
+
+  try:
+    # Defaults to localhost.
+    with smtplib.SMTP(args.smtp_server) as s:
+      #s.set_debuglevel(1)
+      s.send_message(msg)
+    logging.info(f"Notification email sent to {args.admin_email}")
+  except Exception as e:
+    logging.error(f"Failed to send email: {e}")
+
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
   """Handle requests in a separate thread."""
   daemon_threads = True
+
 
 class StatusHandler(BaseHTTPRequestHandler):
   def do_GET(self):
@@ -75,75 +123,68 @@ class StatusHandler(BaseHTTPRequestHandler):
     self.end_headers()
     self.wfile.write(f'{current_status.value}\n'.encode())
 
-  def handle_error(self, request, client_address):
-    # Get the current exception
-    exctype, value = sys.exc_info()[:2]
-
-    # If it's just a connection reset, log it as a warning (or ignore it)
-    if exctype is ConnectionResetError:
-      logging.warning(f'Connection reset by client {client_address}')
-    else:
-      # For all other "real" errors, use the default behavior
-      super().handle_error(request, client_address)
-
   def log_message(self, format, *args):
-    # Redirect server logs to logging module
     logging.info('%s - - %s' % (self.address_string(), format % args))
 
-def monitor_power(pin: int, delay_seconds: int):
+
+def monitor_power(args: argparse.Namespace) -> None:
   """Watches the GPIO pin and updates the global status."""
   global current_status
 
-  # pull_up=False means we expect 3.3v to pull the pin HIGH
-  power_sense = Button(pin, pull_up=False)
-
-  logging.info(f'Monitoring GPIO {pin}. Shutdown delay: {delay_seconds}s')
+  power_sense = Button(args.input_pin, pull_up=False)
+  logging.info(f'Monitoring GPIO {args.input_pin}. Shutdown delay: {args.delay}s')
 
   current_status = (
-      PowerStatus.OK
-      if power_sense.is_pressed
-      else PowerStatus.BATTERY
+    PowerStatus.POWERED
+    if power_sense.is_pressed
+    else PowerStatus.BATTERY
   )
 
   while True:
     if power_sense.is_pressed:
       # Power is present
-      if current_status != PowerStatus.OK:
-        logging.info(f'Power restored! [was {current_status.value}]')
-        current_status = PowerStatus.OK
-    elif current_status in {PowerStatus.OK, PowerStatus.BATTERY}:
-      # Power is lost, start the countdown
-      logging.warning(f'Power loss detected! Waiting {delay_seconds}s before signaling shutdown...')
+      if current_status != PowerStatus.POWERED:
+        old = current_status
+        current_status = PowerStatus.POWERED
+        logging.info(f'Power restored from {old.value} state.')
+        send_notification(args, 'Power restored', current_status, old)
 
-      # Re-check during the delay
+    elif current_status in {PowerStatus.POWERED, PowerStatus.BATTERY}:
+      # Power just lost
+      old = current_status
+      current_status = PowerStatus.BATTERY
+      logging.warning(f'Power loss detected! Waiting {args.delay}s before signaling shutdown...')
+      send_notification(args, 'Power is out', current_status, old)
+
+      # Enter grace period countdown
       lost_time = time.time()
       still_lost = True
-      current_status = PowerStatus.BATTERY
-
-      while time.time() - lost_time < delay_seconds:
+      while time.time() - lost_time < args.delay:
         time.sleep(1)
         if power_sense.is_pressed:
+          old = current_status
+          current_status = PowerStatus.POWERED
           logging.info('Power restored during grace period.')
           still_lost = False
+          send_notification(args, 'Power restored', current_status, old)
           break
 
-      if still_lost:
-        logging.critical('Grace period exceeded. Status: shutdown')
+      if still_lost and current_status != PowerStatus.SHUTDOWN:
+        old = current_status
         current_status = PowerStatus.SHUTDOWN
+        logging.critical('Grace period exceeded. Status: shutdown')
 
     time.sleep(1)
 
 
 def main(args: argparse.Namespace) -> int:
-  # Start the power monitoring in a background thread
   monitor_thread = Thread(
-      target=monitor_power, 
-      args=(args.input_pin, args.delay), 
-      daemon=True
+    target=monitor_power,
+    args=[args],
+    daemon=True
   )
   monitor_thread.start()
 
-  # Start the HTTP server
   server_address = ('', args.port)
   httpd = ThreadedHTTPServer(server_address, StatusHandler)
   logging.info(f'Server started on port {args.port}')
@@ -160,7 +201,7 @@ def main(args: argparse.Namespace) -> int:
 if __name__ == '__main__':
   a = define_flags()
   logging.basicConfig(
-      level=a.verbosity,
-      datefmt='%Y/%m/%d %H:%M:%S',
-      format='%(levelname)s: %(message)s')
+    level=a.verbosity,
+    datefmt='%Y/%m/%d %H:%M:%S',
+    format='%(levelname)s: %(message)s')
   sys.exit(main(a))
