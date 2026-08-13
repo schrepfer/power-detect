@@ -12,6 +12,7 @@ import smtplib
 import socket
 from email.message import EmailMessage
 
+from dataclasses import dataclass
 from enum import Enum
 from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -74,25 +75,37 @@ class PowerStatus(Enum):
   SHUTDOWN = 'shutdown'
 
 
-# Initial state
-current_status = PowerStatus.POWERED
+@dataclass
+class PowerState:
+  previous: PowerStatus = PowerStatus.UNKNOWN
+  status: PowerStatus = PowerStatus.UNKNOWN
+  when: datetime.datetime = None
+
+  def update(self, status: PowerStatus):
+    if status != PowerStatus.POWERED and self.status in {PowerStatus.POWERED, PowerStatus.UNKNOWN}:
+      self.when = datetime.datetime.now()
+    self.previous = self.status
+    self.status = status
 
 
-def send_notification(args: argparse.Namespace, message: str, status: PowerStatus, old_status: PowerStatus = PowerStatus.UNKNOWN):
+power_state = PowerState()
+
+
+def send_notification(args: argparse.Namespace, message: str):
   """Sends an email notification via localhost SMTP."""
   if not args.admin_email or not args.smtp_server:
     return
 
-  now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
   fqdn = socket.getfqdn()
 
   msg = EmailMessage()
-  subject = f"[Power Detect] {message}"
+  subject = f"[Power Detect] Power unstable @ {power_state.when}"
 
   body = [
-    f"Event Time:  {now}",
+    f"Message:     {message}",
+    f"Time:        {datetime.datetime.now()}",
     f"Device FQDN: {fqdn}",
-    f"Status:      {old_status.value.upper()} -> {status.value.upper()}",
+    f"Status:      {power_state.status.value.upper()} (from {power_state.previous.value.upper()})",
   ]
 
   msg.set_content('\n'.join(body))
@@ -121,7 +134,7 @@ class StatusHandler(BaseHTTPRequestHandler):
     self.send_response(200)
     self.send_header('Content-type', 'text/plain')
     self.end_headers()
-    self.wfile.write(f'{current_status.value}\n'.encode())
+    self.wfile.write(f'{power_state.status.value}\n'.encode())
 
   def log_message(self, format, *args):
     logging.info('%s - - %s' % (self.address_string(), format % args))
@@ -129,12 +142,10 @@ class StatusHandler(BaseHTTPRequestHandler):
 
 def monitor_power(args: argparse.Namespace) -> None:
   """Watches the GPIO pin and updates the global status."""
-  global current_status
-
   power_sense = Button(args.input_pin, pull_up=False)
   logging.info(f'Monitoring GPIO {args.input_pin}. Shutdown delay: {args.delay}s')
 
-  current_status = (
+  power_state.update(
     PowerStatus.POWERED
     if power_sense.is_pressed
     else PowerStatus.BATTERY
@@ -143,36 +154,37 @@ def monitor_power(args: argparse.Namespace) -> None:
   while True:
     if power_sense.is_pressed:
       # Power is present
-      if current_status != PowerStatus.POWERED:
-        old = current_status
-        current_status = PowerStatus.POWERED
-        logging.info(f'Power restored from {old.value} state.')
-        send_notification(args, 'Power restored', current_status, old)
+      if power_state.status != PowerStatus.POWERED:
+        power_state.update(PowerStatus.POWERED)
+        logging.info(f'Power restored from {power_state.previous.value} state.')
+        send_notification(args, 'Power restored')
 
-    elif current_status in {PowerStatus.POWERED, PowerStatus.BATTERY}:
+    elif power_state.status in {PowerStatus.POWERED, PowerStatus.BATTERY}:
       # Power just lost
-      old = current_status
-      current_status = PowerStatus.BATTERY
+      power_state.update(PowerStatus.BATTERY)
       logging.warning(f'Power loss detected! Waiting {args.delay}s before signaling shutdown...')
-      send_notification(args, 'Power is out', current_status, old)
+      send_notification(args, 'Power switching to battery')
 
       # Enter grace period countdown
       lost_time = time.time()
       still_lost = True
-      while time.time() - lost_time < args.delay:
-        time.sleep(1)
-        if power_sense.is_pressed:
-          old = current_status
-          current_status = PowerStatus.POWERED
-          logging.info('Power restored during grace period.')
-          still_lost = False
-          send_notification(args, 'Power restored', current_status, old)
+      while True:
+        since = time.time() - lost_time
+        if since >= args.delay:
           break
 
-      if still_lost and current_status != PowerStatus.SHUTDOWN:
-        old = current_status
-        current_status = PowerStatus.SHUTDOWN
+        time.sleep(1)
+        if power_sense.is_pressed:
+          power_state.update(PowerStatus.POWERED)
+          logging.info('Power restored during grace period.')
+          still_lost = False
+          send_notification(args, f'Power restored within {since:.1f}s during grace period (no shutdown)')
+          break
+
+      if still_lost and power_state.status != PowerStatus.SHUTDOWN:
+        power_state.update(PowerStatus.SHUTDOWN)
         logging.critical('Grace period exceeded. Status: shutdown')
+        send_notification(args, 'Power switching to shutdown')
 
     time.sleep(1)
 
