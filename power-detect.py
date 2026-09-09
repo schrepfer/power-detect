@@ -137,7 +137,7 @@ class StatusHandler(BaseHTTPRequestHandler):
     self.wfile.write(f'{power_state.status.value}\n'.encode())
 
   def log_message(self, format, *args):
-    logging.info('%s - - %s' % (self.address_string(), format % args))
+    logging.debug('%s - - %s' % (self.address_string(), format % args))
 
 
 def monitor_power(args: argparse.Namespace) -> None:
